@@ -1,14 +1,15 @@
 package com.ecommerce.dto.request;
 
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 import java.util.List;
 
 @Data
 public class OrderCreateRequest {
-    
-    @NotNull(message = "Sipariş listesi boş olamaz")
+
+    @NotEmpty(message = "Sipariş listesi boş olamaz")
     private List<OrderItemRequest> items;
 
     @Data

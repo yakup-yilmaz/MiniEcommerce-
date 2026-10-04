@@ -1,10 +1,14 @@
 package com.ecommerce.exception;
 
-import java.nio.file.AccessDeniedException;
+// DIKKAT: java.nio.file.AccessDeniedException (dosya sistemi hatasi) DEGIL!
+// Spring Security'nin AccessDeniedException'i olmali; yoksa @PreAuthorize reddi
+// bu handler'a gelmez, en alttaki Exception handler'a duser ve 500 doner.
+import org.springframework.security.access.AccessDeniedException;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -64,6 +68,18 @@ public class GlobalExceptionHandler {
                 .timestamp(LocalDateTime.now())
                 .build();
         return new ResponseEntity<>(response, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
+        ErrorResponse response = ErrorResponse.builder()
+                .status(HttpStatus.CONFLICT.value())
+                .error(HttpStatus.CONFLICT.getReasonPhrase())
+                .message(
+                        "Veritabanı kısıt ihlali: Bu kayda bağlı başka veriler bulunduğu için işlem gerçekleştirilemez.")
+                .timestamp(LocalDateTime.now())
+                .build();
+        return new ResponseEntity<>(response, HttpStatus.CONFLICT);
     }
 
 }

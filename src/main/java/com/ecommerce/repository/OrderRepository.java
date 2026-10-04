@@ -1,6 +1,8 @@
 package com.ecommerce.repository;
 
 import com.ecommerce.entity.Order;
+import com.ecommerce.enums.OrderStatus;
+
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -23,5 +25,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     // Aynı işlemi kullanıcının kendi sipariş detayı için
     @Query("SELECT o FROM Order o LEFT JOIN FETCH o.items WHERE o.id = :orderId AND o.user.id = :userId")
     Optional<Order> findByIdAndUserIdWithItems(@Param("orderId") Long orderId, @Param("userId") Long userId);
+
+    Page<Order> findByStatus(OrderStatus status, Pageable pageable);
 
 }

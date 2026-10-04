@@ -7,6 +7,6 @@ import lombok.Data;
 public class CategoryCreateRequest {
     @NotBlank(message = "Kategori adı boş olamaz")
     private String name;
-
     private String description;
+
 }
