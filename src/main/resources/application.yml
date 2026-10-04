@@ -1,8 +1,8 @@
-﻿spring:
+spring:
   application:
     name: ecommerce
 
-  # PostgreSQL
+  # PostgreSQL (docker-compose ile uyumlu)
   datasource:
     url: jdbc:postgresql://localhost:5432/ecommerce
     username: admin
@@ -26,10 +26,21 @@
       port: 6379
 
 # JWT
+# ------------------------------------------------
+# jwt.secret: Token imzalamak icin kullanilan gizli anahtar.
+#   En az 32 karakter (256 bit) olmali. Bu ornek deger yeterince uzun.
+#   Uretim ortaminda environment variable ile gizlenmelidir.
+#
+# jwt.access-expiration-ms: Access Token suresi (milisaniye)
+#   900000 ms = 15 dakika
+#
+# jwt.refresh-expiration-ms: Refresh Token suresi (milisaniye)
+#   604800000 ms = 7 gun
+# ------------------------------------------------
 jwt:
   secret: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
-  access-token-expiration: 900000
-  refresh-token-expiration: 604800000
+  access-expiration-ms: 900000
+  refresh-expiration-ms: 604800000
 
 # Swagger UI
 springdoc:
@@ -43,3 +54,11 @@ springdoc:
 # Server
 server:
   port: 8080
+
+# E-Commerce Custom Settings
+ecommerce:
+  discount:
+    active-strategy: PERCENTAGE # NO_DISCOUNT | PERCENTAGE | FIXED_AMOUNT
+    percentage-rate: 0.10       # %10 indirim
+    fixed-amount: 50.00         # 50.00 TL indirim
+

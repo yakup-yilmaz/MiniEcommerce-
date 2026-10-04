@@ -150,7 +150,7 @@ Product     * ────────── 1 Category
 | `refresh_token:{userId}` | Auth | refresh token string | 7 gün |
 | `blacklist:{accessToken}` | Auth | `"revoked"` | Token'ın kalan ömrü |
 | `products::*` | Cache | JSON (product listesi) | 10 dakika |
-| `categories::allCategories` | Cache | JSON (kategori listesi) | 30 dakika |
+| `categories::all`, `categories::{id}` | Cache | JSON (kategori listesi / tekil kategori) | 30 dakika |
 | `login_attempts:{ip}` | Rate Limit | sayaç (integer) | 15 dakika |
 
 ### Rol Yetkileri
@@ -176,11 +176,11 @@ POST   /api/auth/register          → Kayıt ol
 
 POST   /api/auth/login             → Giriş yap
        Body: { email, password }
-       Response: { accessToken, refreshToken, expiresIn }
+       Response: { accessToken, refreshToken }
 
 POST   /api/auth/refresh           → Yeni access token al
        Body: { refreshToken }
-       Response: { accessToken, expiresIn }
+        Response: { accessToken, refreshToken }  (refresh token rotation: her refresh'te yeni çift döner)
 
 POST   /api/auth/logout            → Çıkış yap
        Header: Authorization: Bearer <accessToken>
@@ -266,18 +266,23 @@ DiscountStrategy (interface)
   │     return totalPrice;
   │
   ├── PercentageDiscountStrategy
-  │     private double percentage; // örn: 0.10 → %10
-  │     return totalPrice.multiply(1 - percentage);
+  │     @Value("${ecommerce.discount.percentage-rate:0.10}")
+  │     return totalPrice - (totalPrice * percentage);
   │
   └── FixedAmountDiscountStrategy
-        private BigDecimal amount; // örn: 50 TL
-        return totalPrice.subtract(amount);
+        @Value("${ecommerce.discount.fixed-amount:50.00}")
+        return totalPrice - amount;
 ```
 
 **Nasıl kullanılır:**
 ```java
 // OrderFacade içinde
-DiscountStrategy strategy = discountStrategyFactory.getActiveStrategy();
+// 1. Sistemde o an aktif olan stratejiyi döner (application.yml'deki active-strategy)
+DiscountStrategy strategy = discountStrategyFactory.getStrategy();
+
+// Veya istenirse belirli bir tipe göre strateji çekilebilir:
+// DiscountStrategy strategy = discountStrategyFactory.getStrategy("PERCENTAGE");
+
 BigDecimal finalPrice = strategy.apply(rawTotal);
 ```
 
@@ -312,35 +317,63 @@ OrderFacade.placeOrder(request, user):
 
 ---
 
-### 3. Adapter Pattern — Fiyat Formatı
+### 3. Adapter Pattern — Bildirim Gönderme (Email + Push)
 
-**Problem:** Sistemde fiyat `BigDecimal` olarak tutulur (örn: `1250.00`).
-Ama API response'unda farklı formatlarda gösterilmesi istenebilir.
+**Problem:** Sipariş verilince kullanıcıya bildirim gitmeli. Ama bildirim gönderen "dış" sınıfların
+imzaları birbirinden ve bizim sistemimizden farklı (`sendMail(...)`, `pushToDevice(...)`).
+Listener'ın bu farklılıkları bilmesi gerekmez.
 
-**Çözüm:** Ortak bir interface, farklı implementasyonlar.
+**Çözüm:** Sistemin kendi interface'i (`NotificationSender`) tanımlanır. Her dış sınıf için bir **Adapter**
+yazılır, adapter mesajı dış sınıfın beklediği formata **çevirir**.
+
+> ℹ️ Dış client'lar gerçek mail/push göndermez, sadece log basar (simülasyon).
+> Gerçek bir SDK (örn. JavaMailSender) gelirse sadece adapter'ın içi değişir, listener'a dokunulmaz.
 
 ```
-PriceFormatter (interface)
-  └── String format(BigDecimal price)
+NotificationMessage (küçük DTO)
+  recipientEmail, recipientId, title, content
 
-  ├── TRYPriceAdapter
-  │     → "1.250,00 ₺"
+NotificationSender (interface — sistemin beklediği arayüz)
+  └── void send(NotificationMessage message)
+
+  ├── EmailNotificationAdapter  → FakeEmailClient'a çevirir
+  │     FakeEmailClient.sendMail(String address, String subject, String htmlBody) : boolean
+  │     - recipientEmail → address
+  │     - title → subject
+  │     - content düz metin → HTML'e sarılır (<h3>, <b>)
+  │     - boolean false ise uyarı loglar
   │
-  └── USDPriceAdapter
-        → "$34.72"
+  └── PushNotificationAdapter   → FakePushClient'a çevirir
+        FakePushClient.pushToDevice(String deviceKey, String title, String payloadJson) : String
+        - recipientId → deviceKey ("user-" + id)
+        - content → JSON payload'a çevrilir
+        - dönen mesaj id'sini loglar
+```
+
+**Log çıktıları (aynı bilgi, farklı biçim):**
+```
+[EMAIL] to=yakup@test.com | subject=Siparişiniz alındı | body=<h3>Siparişiniz alındı</h3><b>Sipariş #1001, toplam 88.000 TL</b>
+[PUSH]  device=user-1 | id=PUSH-8a3f | title=Siparişiniz alındı | payload={"orderId":1001,"total":"88.000"}
 ```
 
 **Nasıl kullanılır:**
 ```java
-// ProductMapper içinde, request header'ına göre
-String currency = request.getHeader("Accept-Currency");
-PriceFormatter formatter = priceFormatterFactory.getFormatter(currency);
-response.setFormattedPrice(formatter.format(product.getPrice()));
+// OrderEventListener içinde — log.info yerine
+// Spring tüm NotificationSender bean'lerini (iki adapter) otomatik toplar
+private final List<NotificationSender> senders;
+
+NotificationMessage message = new NotificationMessage(
+    user.getEmail(), user.getId(), "Siparişiniz alındı", "Sipariş #" + order.getId() + ", toplam " + order.getTotalPrice());
+senders.forEach(sender -> sender.send(message));
 ```
 
+**Kapsam:** Sadece `OrderPlacedEvent` için tetiklenir. `User` entity'sine alan eklenmez.
+Sipariş akışı (OrderFacade) değişmez, sadece listener'daki log satırı yerine bu çağrı gelir.
+
 **Neden iyi:**
-- Yeni para birimi eklemek için sadece yeni bir Adapter yazarsın
-- Mevcut kod değişmez
+- Listener dış sınıfların imzasını bilmez
+- Yeni kanal (SMS, Slack) eklemek için sadece yeni bir Adapter yazarsın, mevcut kod değişmez
+- Test kolay: `NotificationSender` mock'lanabilir
 
 ---
 
@@ -554,27 +587,26 @@ OrderFacade.placeOrder()          ← @Transactional burada
 | `MethodArgumentNotValidException` | 400 | Bean Validation hataları |
 | `Exception` (fallback) | 500 | Beklenmedik tüm hatalar |
 
-### Standart ApiResponse Wrapper
+### Standart Hata Cevabı (ErrorResponse)
+Başarılı cevaplar sarmalayıcı (wrapper) olmadan doğrudan DTO olarak döner.
+Sadece hatalar standart `ErrorResponse` formatında döner:
 ```json
-// Başarılı
-{
-  "success": true,
-  "message": "Sipariş başarıyla oluşturuldu",
-  "data": { ... }
-}
-
 // Hata
 {
-  "success": false,
-  "message": "Ürün bulunamadı",
-  "errors": null
+  "status": 404,
+  "error": "Not Found",
+  "message": "Ürün bulunamadı. id : '5'",
+  "timestamp": "2026-10-04T01:00:00",
+  "validationErrors": null
 }
 
 // Validation hatası
 {
-  "success": false,
-  "message": "Validation hatası",
-  "errors": {
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Gönderilen verilerde doğrulama hataları mevcut.",
+  "timestamp": "2026-10-04T01:00:00",
+  "validationErrors": {
     "email": "Geçerli bir email adresi giriniz",
     "password": "Şifre en az 6 karakter olmalıdır"
   }
@@ -669,7 +701,7 @@ T2: kilidi aldı → stock=0 → InsufficientStockException fırlatır ✅
 ### Controller Kullanımı
 ```java
 @GetMapping
-public ResponseEntity<ApiResponse<Page<ProductResponse>>> getProducts(
+public ResponseEntity<Page<ProductDto>> getProducts(
     @RequestParam(defaultValue = "0") int page,
     @RequestParam(defaultValue = "10") int size,
     @RequestParam(defaultValue = "id") String sortBy,
@@ -688,16 +720,13 @@ public ResponseEntity<ApiResponse<Page<ProductResponse>>> getProducts(
 ### Response Formatı
 ```json
 {
-  "success": true,
-  "data": {
-    "content": [ { "id": 1, "name": "Laptop", "price": "15.999,00 ₺" } ],
-    "pageable": { "pageNumber": 0, "pageSize": 10 },
-    "totalElements": 47,
-    "totalPages": 5,
-    "first": true,
-    "last": false,
-    "numberOfElements": 10
-  }
+  "content": [ { "id": 1, "name": "Laptop", "price": 15999.00 } ],
+  "pageable": { "pageNumber": 0, "pageSize": 10 },
+  "totalElements": 47,
+  "totalPages": 5,
+  "first": true,
+  "last": false,
+  "numberOfElements": 10
 }
 ```
 
@@ -802,7 +831,9 @@ Bağımlılıklar `@Mock` ile taklit edilir, sadece test ettiğin sınıf gerçe
 | `PricingServiceTest` | Toplam fiyat hesaplama, quantity * unitPrice |
 | `RefreshTokenServiceTest` | Token kaydet, bul, sil — Redis mock ile |
 | `TokenBlacklistServiceTest` | Blacklist'e ekle, var mı kontrolü |
-| `OrderEventListenerTest` | Event gelince doğru log basılıyor mu? |
+| `OrderEventListenerTest` | Event gelince tüm `NotificationSender`'lar çağrılıyor mu? |
+| `EmailNotificationAdapterTest` | Mesaj doğru subject/HTML'e çevriliyor mu? |
+| `PushNotificationAdapterTest` | Mesaj doğru deviceKey/JSON'a çevriliyor mu? |
 
 ---
 
@@ -916,10 +947,13 @@ com.yourname.ecommerce
 │   │   ├── FixedAmountDiscountStrategy.java
 │   │   └── DiscountStrategyFactory.java     ← aktif stratejiyi döndürür
 │   └── adapter/
-│       ├── PriceFormatter.java              ← interface
-│       ├── TRYPriceAdapter.java
-│       ├── USDPriceAdapter.java
-│       └── PriceFormatterFactory.java       ← currency'e göre adapter döndürür
+│       ├── NotificationMessage.java         ← recipientEmail, recipientId, title, content
+│       ├── NotificationSender.java          ← interface (sistemin beklediği arayüz)
+│       ├── EmailNotificationAdapter.java    ← FakeEmailClient'a çevirir
+│       ├── PushNotificationAdapter.java     ← FakePushClient'a çevirir
+│       └── client/
+│           ├── FakeEmailClient.java         ← "dış kütüphane" taklidi, sadece log basar
+│           └── FakePushClient.java          ← "dış kütüphane" taklidi, sadece log basar
 │
 ├── entity/
 │   ├── User.java
@@ -947,9 +981,9 @@ com.yourname.ecommerce
 │   │   ├── OrderItemRequest.java
 │   │   └── OrderStatusRequest.java
 │   └── response/
-│       ├── ApiResponse.java         ← generic wrapper: success, message, data, errors
-│       ├── AuthResponse.java        ← accessToken, refreshToken, expiresIn
-│       ├── ProductResponse.java     ← id, name, price, formattedPrice, stock, category
+│       ├── ErrorResponse (exception/ paketinde) ← hata formatı
+│       ├── AuthResponse.java        ← accessToken, refreshToken
+│       ├── ProductResponse.java     ← id, name, price, stock, category
 │       ├── CategoryResponse.java
 │       ├── OrderResponse.java       ← id, items, totalPrice, status, createdAt
 │       └── OrderItemResponse.java
@@ -1018,11 +1052,28 @@ public ProductResponse updateProduct(Long id, ProductRequest request) { ... }
 public void deleteProduct(Long id) { ... }
 
 // CategoryService
-@Cacheable(value = "categories", key = "'allCategories'")
-public List<CategoryResponse> getAllCategories() { ... }
+@Cacheable(value = "categories", key = "'all'")
+public List<CategoryDto> getAllCategory() { ... }
 
-@CacheEvict(value = "categories", allEntries = true)
-public CategoryResponse createCategory(CategoryRequest request) { ... }
+@Cacheable(value = "categories", key = "#id")
+public CategoryDto getCategoryById(Long id) { ... }
+
+// Yeni kategori: sadece liste cache'i silinir (tekil key'ler hala geçerli)
+@CacheEvict(value = "categories", key = "'all'")
+public CategoryDto createCategory(CategoryCreateRequest request) { ... }
+
+// Güncelle/Sil: liste + ilgili id'nin cache'i silinir, diğer kategoriler cache'te kalır
+@Caching(evict = {
+    @CacheEvict(value = "categories", key = "'all'"),
+    @CacheEvict(value = "categories", key = "#id")
+})
+public CategoryDto updateCategory(Long id, CategoryCreateRequest request) { ... }
+
+@Caching(evict = {
+    @CacheEvict(value = "categories", key = "'all'"),
+    @CacheEvict(value = "categories", key = "#id")
+})
+public void deleteCategory(Long id) { ... }
 ```
 
 ### Config
@@ -1056,7 +1107,7 @@ public RedisCacheConfiguration cacheConfiguration() {
 | Cache Adı | TTL | Ne zaman temizlenir? |
 |---|---|---|
 | `products` | 10 dakika | Ürün ekle/güncelle/sil |
-| `categories` | 30 dakika | Kategori ekle/güncelle/sil |
+| `categories` | 30 dakika | Kategori ekle (`all`), güncelle/sil (`all` + `#id`) |
 
 ---
 
@@ -1202,7 +1253,7 @@ services:
 3. Entity'leri yaz (`User`, `Category`, `Product`, `Order`, `OrderItem`)
 4. Repository'leri yaz (custom sorgular + `@Lock` dahil)
 5. Enum'ları yaz (`Role`, `OrderStatus`)
-6. Exception sınıfları + `GlobalExceptionHandler` + `ApiResponse<T>` wrapper
+6. Exception sınıfları + `GlobalExceptionHandler` + `ErrorResponse`
    - `RateLimitException` (429) bu adımda eklenir
 7. DTO'ları yaz (request + response)
 8. Mapper'ları yaz (`ProductMapper`, `CategoryMapper`, `OrderMapper`)
@@ -1217,10 +1268,10 @@ services:
 14. `CategoryService` + `CategoryController` (CRUD)
     - **`@Cacheable` / `@CacheEvict`** category'ye ekle
 15. Strategy pattern + `DiscountStrategyFactory`
-16. Adapter pattern + `PriceFormatterFactory`
+16. Adapter pattern: `NotificationSender` + Email/Push adapter'ları + Fake client'lar
 17. `PricingService` + `ProductService` + `ProductController` (CRUD + pagination + filtre)
     - **`@Cacheable` / `@CacheEvict`** product'a ekle
-18. Event sınıfları + `OrderEventListener` + `StockEventListener` + `AsyncConfig`
+18. Event sınıfları + `OrderEventListener` (NotificationSender'ları çağırır) + `StockEventListener` + `AsyncConfig`
 19. `OrderFacade` + `OrderService` + `OrderController` (sipariş verme akışı)
     - `@CacheEvict` → sipariş verilince stok düştüğü için product cache temizle
 20. Sipariş iptal + `AdminOrderController` (durum güncelleme + `OrderStatusChangedEvent`)
