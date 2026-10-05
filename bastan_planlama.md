@@ -12,7 +12,7 @@
 - [x] **Adım 2:** Veritabanı Entity'leri (`User`, `Category`, `Product`, `Order`, `OrderItem`)
 - [x] **Adım 3:** Enum Tanımları (`Role`: ADMIN/CUSTOMER, `OrderStatus`: PENDING/CONFIRMED/SHIPPED/DELIVERED/CANCELLED)
 - [x] **Adım 4:** Repository Katmanı (Pessimistic Write Lock, Timeout & Dinamik Filtreleme)
-- [x] **Adım 5:** Global Exception Handling (`ApiException`, 409 Conflict, 400 Validation, 403, 404, 429)
+- [x] **Adım 5:** Global Exception Handling (9 Sınıf: `ApiException`, `ResourceNotFoundException`, `AlreadyExistsException`, `InsufficientStockException`, `OrderCancellationException`, `RateLimitException`, `UnauthorizedException`, `ErrorResponse`, `GlobalExceptionHandler`)
 - [x] **Adım 6:** DTO Katmanı (Request & Response modelleri)
 - [x] **Adım 7:** MapStruct Mapper'ları (`ProductMapper`, `CategoryMapper`, `OrderMapper`)
 - [x] **Adım 8:** Redis Yapılandırması (`RedisConfig`, Cache TTL ayarları)
@@ -25,7 +25,7 @@
 - [x] **Adım 15:** Strategy Pattern — İndirim Hesaplama (`DiscountStrategy`, `NoDiscount`, `Percentage`, `FixedAmount`, `DiscountStrategyFactory`)
 - [x] **Adım 16:** Adapter Pattern — Çoklu Bildirim Altyapısı (`NotificationSender`, `FakeEmailClient`, `FakePushClient`, `EmailNotificationAdapter`, `PushNotificationAdapter`, `NotificationMessage`)
 - [x] **Adım 17:** Fiyatlandırma & Ürün Yönetimi (`PricingService`, `ProductService`, `ProductController`)
-- [ ] **Adım 18:** Asenkron Event Sistemi (`AsyncConfig`, `OrderPlacedEvent`, `OrderStatusChangedEvent`, `OrderEventListener`)
+- [x] **Adım 18:** Asenkron Event Sistemi (`AsyncConfig`, `OrderPlacedEvent`, `OrderStatusChangedEvent`, `OrderEventListener`, `InvoiceEventListener`)
 - [ ] **Adım 19:** Sipariş Orkestrasyonu (`OrderFacade`, `OrderService`, `OrderController`)
 - [ ] **Adım 20:** Admin Sipariş Yönetimi (`AdminOrderController`)
 - [ ] **Adım 21 - 24:** Test Mühendisliği (Unit, Repository, Controller, Testcontainers Concurrency)
@@ -37,48 +37,33 @@
 
 ---
 
-### 🔹 Adım 17: Fiyatlandırma & Ürün Yönetimi (Pricing & Product)
+### 🔹 Adım 17: Fiyatlandırma & Ürün Yönetimi (Pricing & Product) ✅ (Tamamlandı)
 
 #### 1. `PricingService.java` ✅ (Tamamlandı)
 * **Paket:** `com.ecommerce.service`
 * **Görevi:** `calculateRawTotal(List<OrderItem> items)` metodu ile sepetteki ürünlerin adet ve birim fiyatlarını çarpar, ham toplamı kuruş kaybı olmadan 2 basamağa yuvarlayarak döner.
 
-#### 2. `ProductService.java` ⏳ (Sıradaki Sınıf)
+#### 2. `ProductService.java` ✅ (Tamamlandı)
 * **Paket:** `com.ecommerce.service`
 * **Anotasyonlar:** `@Service`, `@RequiredArgsConstructor`, `@Slf4j`
 * **Bağımlılıklar:** `ProductRepository`, `CategoryRepository`, `ProductMapper`
 * **Metotlar ve İş Mantığı:**
-  1. `getProductsWithFilters(Long categoryId, BigDecimal minPrice, BigDecimal maxPrice, String name, Pageable pageable)`:
-     - `@Transactional(readOnly = true)`
-     - Repository'deki `findWithFilters` sorgusunu çağırır.
-     - `products.map(productMapper::toDto)` ile sayfalı DTO döner.
-  2. `getProductById(Long id)`:
-     - `@Cacheable(value = "products", key = "#id")`
-     - `@Transactional(readOnly = true)`
-     - İlk çağrıda DB'den çeker, sonrakilerde Redis'ten getirir. Bulunamazsa `ResourceNotFoundException`.
-  3. `createProduct(ProductCreateRequest request)`:
-     - `@CacheEvict(value = "products", allEntries = true)`
-     - `@Transactional`
-     - Kategori ID kontrolü yapar, entity oluşturur, kaydeder ve DTO döner.
-  4. `updateProduct(Long id, ProductCreateRequest request)`:
-     - `@CacheEvict(value = "products", allEntries = true)`
-     - `@Transactional`
-     - Ürünü bulur, kategori değiştiyse yeni kategoriyi bağlar, günceller ve DTO döner.
-  5. `deleteProduct(Long id)`:
-     - `@CacheEvict(value = "products", allEntries = true)`
-     - `@Transactional`
-     - Ürünü siler (bağlı sipariş kalemi varsa `DataIntegrityViolationException` -> 409 Conflict döner).
-  6. `checkStock(Product product, Integer requestedQuantity)`:
-     - `product.getStock() < requestedQuantity` ise `InsufficientStockException` fırlatır.
-  7. `decreaseStock(Product product, Integer quantity)`:
-     - Stok kontrolü yapar, `product.setStock(product.getStock() - quantity)` yapıp DB'ye yazar.
+  1. `getProductWithFilters(Long categoryId, BigDecimal minPrice, BigDecimal maxPrice, String name, Pageable pageable)`: Dinamik filtreleme ve sayfalama.
+  2. `getProductById(Long id)`: `@Cacheable(value = "products", key = "#id")` ile Redis önbelleği.
+  3. `createProduct(ProductCreateRequest request)`: `@CacheEvict(allEntries = true)` ile yeni ürün ekleme.
+  4. `updateProduct(Long id, ProductCreateRequest request)`: `@CacheEvict(allEntries = true)` ile tam güncelleme.
+  5. `deleteProduct(Long id)`: `@CacheEvict(allEntries = true)` ile silme.
+  6. `checkStock(Product product, Integer requestedQuantity)`: Stok yetersizse `InsufficientStockException`.
+  7. `decreaseStock(Product product, Integer quantity)`: `@CacheEvict(key = "#product.id")` ile stok düşürme.
+  8. `getProductEntityWithLock(Long id)`: Sipariş modülü için Pessimistic Write Lock ile entity çekme.
+  9. `getProductEntityById(Long id)`: Salt okunur entity çekme.
 
-#### 3. `ProductController.java`
+#### 3. `ProductController.java` ✅ (Tamamlandı)
 * **Paket:** `com.ecommerce.controller`
 * **Endpoint'ler:**
   - `GET /api/products`: Herkese açık (filtre ve sayfalama destekli).
-  - `GET /api/products/{id}`: Herkese açık ürün detayı.
-  - `POST /api/products`: Sadece `ADMIN` (`hasRole('ADMIN')`) -> `201 CREATED`.
+  - `GET /api/products/{id}`: Herkese açık ürün detayı (Redis destekli).
+  - `POST /api/products`: Sadece `ADMIN` -> `201 CREATED`.
   - `PUT /api/products/{id}`: Sadece `ADMIN` -> `200 OK`.
   - `DELETE /api/products/{id}`: Sadece `ADMIN` -> `204 NO CONTENT`.
 
@@ -97,11 +82,17 @@
 #### 3. `OrderEventListener.java`
 * **Paket:** `com.ecommerce.event`
 * **Anotasyonlar:** `@Component`, `@RequiredArgsConstructor`, `@Slf4j`
-* **Bağımlılıklar:** `List<NotificationSender> notificationSenders` (Adım 16'da yazdığımız Email ve Push adapter'ları).
+* **Bağımlılıklar:** `List<NotificationSender> notificationSenders` (Adım 16'daki Email ve Push adapter'ları).
 * **Görevi:**
-  - `@Async`, `@EventListener` `handleOrderPlaced(OrderPlacedEvent event)`:
-  - Gelen event verisinden `NotificationMessage` oluşturur.
-  - `notificationSenders.forEach(sender -> sender.send(message));` diyerek tek satırda hem e-posta hem push bildirimini asenkron olarak fırlatır!
+  - `@Async("taskExecutor")`, `@EventListener` `handleOrderPlaced(OrderPlacedEvent event)`: Tek döngüde hem E-posta hem Push bildirimini asenkron ateşler.
+  - `@Async("taskExecutor")`, `@EventListener` `handleOrderStatusChanged(OrderStatusChangedEvent event)`: Durum değişiminde bildirim gönderir.
+
+#### 4. `InvoiceEventListener.java` (Yeni: E-Fatura Kesim Dinleyicisi)
+* **Paket:** `com.ecommerce.event`
+* **Anotasyonlar:** `@Component`, `@Slf4j`
+* **Görevi:**
+  - `@Async("taskExecutor")`, `@EventListener` `handleOrderPlaced(OrderPlacedEvent event)`:
+  - Sipariş verildiğinde `OrderEventListener` ile aynı anda arka planda paralel çalışır; müşteriyi hiç bekletmeden `INV-2026-XXXXXX` formatında asenkron e-fatura kesimini simüle eder.
 
 ---
 

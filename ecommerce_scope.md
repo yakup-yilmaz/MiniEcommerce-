@@ -441,24 +441,20 @@ Bunları Facade'a yazarsak tek sorumluluk ilkesi bozulur.
 
 ### Event Sınıfları
 ```java
-// Sipariş verildi eventi
+// Sipariş verildi eventi (Payload DTO)
 public class OrderPlacedEvent {
-    private final Order order;
-    private final User user;
-    // constructor, getter
+    private final Long orderId;
+    private final Long userId;
+    private final String userEmail;
+    private final BigDecimal totalPrice;
 }
 
-// Sipariş durumu değişti eventi
+// Sipariş durumu değişti eventi (Payload DTO)
 public class OrderStatusChangedEvent {
-    private final Order order;
-    private final OrderStatus oldStatus;
+    private final Long orderId;
+    private final String userEmail;
+    private final OrderStatus previousStatus;
     private final OrderStatus newStatus;
-}
-
-// Stok kritik seviyeye düştü eventi
-public class LowStockEvent {
-    private final Product product;
-    private final int remainingStock;
 }
 ```
 
@@ -467,64 +463,73 @@ public class LowStockEvent {
 ### Event Yayınlama
 ```java
 // OrderFacade içinde — sipariş kaydedildikten SONRA
-eventPublisher.publishEvent(new OrderPlacedEvent(savedOrder, user));
+eventPublisher.publishEvent(new OrderPlacedEvent(order.getId(), user.getId(), user.getEmail(), order.getTotalPrice()));
 
-// AdminOrderService içinde — durum güncellenince
-eventPublisher.publishEvent(new OrderStatusChangedEvent(order, oldStatus, newStatus));
-
-// ProductService içinde — stok düşünce
-if (product.getStock() < LOW_STOCK_THRESHOLD) {
-    eventPublisher.publishEvent(new LowStockEvent(product, product.getStock()));
-}
+// AdminOrderController içinde — sipariş durumu güncellenince
+eventPublisher.publishEvent(new OrderStatusChangedEvent(order.getId(), order.getUser().getEmail(), previousStatus, newStatus));
 ```
 
 ---
 
-### Event Dinleyiciler
+### Event Dinleyiciler (Asenkron & Ayrık Çalışan Dinleyiciler)
 
-#### @TransactionalEventListener — Neden Önemli?
-```java
-// ❌ @EventListener kullanırsak:
-// Transaction henüz commit olmadan event tetiklenebilir
-// Sipariş DB'ye kaydedilmeden "sipariş verildi" logu basılabilir
-
-// ✅ @TransactionalEventListener kullanırsak:
-// Event sadece transaction başarıyla commit olduktan SONRA tetiklenir
-// Rollback olursa event hiç tetiklenmez
-```
-
+#### 1. `OrderEventListener` (Bildirim Dinleyicisi — Email + Push Adapter)
 ```java
 @Component
+@RequiredArgsConstructor
+@Slf4j
 public class OrderEventListener {
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    @Async  // Ana thread'i bloklamamak için ayrı thread'de çalışır
+    // Spring, NotificationSender uygulayan EmailNotificationAdapter ve PushNotificationAdapter'ı otomatik enjekte eder
+    private final List<NotificationSender> notificationSenders;
+
+    @Async("taskExecutor")
+    @EventListener
     public void handleOrderPlaced(OrderPlacedEvent event) {
-        log.info("✅ Sipariş verildi: OrderId={}, User={}, Total={}",
-            event.getOrder().getId(),
-            event.getUser().getEmail(),
-            event.getOrder().getTotalPrice());
+        log.info("[{}] Sipariş verildi olayı yakalandı: Sipariş ID={}, Tutar={} TL",
+                Thread.currentThread().getName(), event.getOrderId(), event.getTotalPrice());
+
+        NotificationMessage message = NotificationMessage.builder()
+                .recipient(event.getUserEmail())
+                .title("Siparişiniz Alındı!")
+                .body(String.format("Sayın müşterimiz, #%d numaralı siparişiniz başarıyla alındı. Tutar: %s TL",
+                        event.getOrderId(), event.getTotalPrice()))
+                .build();
+
+        notificationSenders.forEach(sender -> sender.send(message));
     }
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    @Async
+    @Async("taskExecutor")
+    @EventListener
     public void handleOrderStatusChanged(OrderStatusChangedEvent event) {
-        log.info("🔄 Sipariş durumu değişti: OrderId={}, {} → {}",
-            event.getOrder().getId(),
-            event.getOldStatus(),
-            event.getNewStatus());
+        log.info("[{}] Sipariş durumu değişti: Sipariş ID={}, {} -> {}",
+                Thread.currentThread().getName(), event.getOrderId(), event.getPreviousStatus(), event.getNewStatus());
+
+        NotificationMessage message = NotificationMessage.builder()
+                .recipient(event.getUserEmail())
+                .title("Sipariş Durumu Güncellendi")
+                .body(String.format("#%d numaralı siparişinizin durumu güncellendi: %s -> %s",
+                        event.getOrderId(), event.getPreviousStatus(), event.getNewStatus()))
+                .build();
+
+        notificationSenders.forEach(sender -> sender.send(message));
     }
 }
+```
 
+#### 2. `InvoiceEventListener` (E-Fatura Kesim Dinleyicisi — Simülasyon)
+```java
 @Component
-public class StockEventListener {
+@Slf4j
+public class InvoiceEventListener {
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-    @Async
-    public void handleLowStock(LowStockEvent event) {
-        log.warn("⚠️ KRİTİK STOK UYARISI: Ürün='{}', Kalan Stok={}",
-            event.getProduct().getName(),
-            event.getRemainingStock());
+    // Sipariş verildiğinde OrderEventListener ile aynı anda arka planda paralel çalışır
+    @Async("taskExecutor")
+    @EventListener
+    public void handleOrderPlaced(OrderPlacedEvent event) {
+        String invoiceNumber = String.format("INV-2026-%06d", event.getOrderId());
+        log.info("[{}] E-Fatura asenkron olarak kesildi. Fatura No: {}, Alıcı: {}, Tutar: {} TL",
+                Thread.currentThread().getName(), invoiceNumber, event.getUserEmail(), event.getTotalPrice());
     }
 }
 ```
@@ -574,18 +579,27 @@ OrderFacade.placeOrder()          ← @Transactional burada
 
 ## ⚠️ Global Exception Handler
 
-`@RestControllerAdvice` — tüm controller'lardan fırlayan exception'ları tek noktada yakalar.
+`@RestControllerAdvice` — tüm controller'lardan fırlayan exception'ları tek noktada yakalar ve standart `ErrorResponse` JSON yapısına dönüştürür.
 
-### Custom Exception'lar
-| Exception | HTTP Status | Ne zaman fırlatılır? |
+### Özel Exception Sınıfları (9 Sınıf)
+| Sınıf Adı | HTTP Status | Ne zaman fırlatılır? |
 |---|---|---|
-| `ResourceNotFoundException` | 404 | Ürün/sipariş/kategori bulunamadı |
-| `InsufficientStockException` | 409 | Stok yetersiz veya lock timeout |
-| `UnauthorizedAccessException` | 403 | Başkasının siparişine erişmeye çalışmak |
-| `OrderCancellationException` | 400 | PENDING dışındaki siparişi iptal etmeye çalışmak |
-| `TokenException` | 401 | Geçersiz/süresi dolmuş/blacklist'teki token |
-| `MethodArgumentNotValidException` | 400 | Bean Validation hataları |
-| `Exception` (fallback) | 500 | Beklenmedik tüm hatalar |
+| `ApiException` | Dinamik | Tüm özel exception'ların soyut ata sınıfı (`status` ve `message` taşır) |
+| `ResourceNotFoundException` | 404 NOT FOUND | Aranan ürün, kategori, sipariş veya kullanıcı veritabanında bulunamadığında |
+| `AlreadyExistsException` | 409 CONFLICT | E-posta veya kategori adı gibi unique alanlar zaten kullanımda olduğunda |
+| `InsufficientStockException` | 400 BAD REQUEST | İstenen adet mevcut stoktan fazla olduğunda |
+| `OrderCancellationException` | 400 BAD REQUEST | `PENDING` dışındaki (onaylanmış/kargoya verilmiş) sipariş iptal edilmek istendiğinde |
+| `RateLimitException` | 429 TOO MANY REQUESTS | 15 dakika içinde 5 kez hatalı şifre denendiğinde (Brute-force kalkanı) |
+| `UnauthorizedException` | 401 UNAUTHORIZED | Token geçersiz, imzası bozuk, süresi dolmuş veya Redis blacklist'te olduğunda |
+| `ErrorResponse` | Model | `status`, `error`, `message`, `timestamp`, `validationErrors` taşıyan DTO |
+| `GlobalExceptionHandler` | ControllerAdvice | `ApiException`, `MethodArgumentNotValidException`, `DataIntegrityViolationException` ve `Exception` yakalayan beyin |
+
+### Framework Seviyesindeki Hataların Yakalanması:
+* **`MethodArgumentNotValidException` (400 Bad Request):** `@Valid` anotasyonu ihlal edildiğinde alan bazlı hata haritası (`validationErrors`) üretir.
+* **`DataIntegrityViolationException` (409 Conflict):** Veritabanı foreign key veya unique constraint ihlal edildiğinde (örn: geçmiş siparişi olan ürünü silmeye çalışmak) sistemi korur.
+* **`AccessDeniedException` (403 Forbidden):** Rol yetersizliği durumunda `JwtAccessDeniedHandler` devreye girer.
+* **`BadCredentialsException` (401 Unauthorized):** Login anında şifre yanlış girildiğinde fırlatılır.
+* **`Exception` (500 Internal Server Error):** Öngörülemeyen genel sistem hataları için en son emniyet sübabı.
 
 ### Standart Hata Cevabı (ErrorResponse)
 Başarılı cevaplar sarmalayıcı (wrapper) olmadan doğrudan DTO olarak döner.
@@ -907,112 +921,111 @@ Docker'da gerçek PostgreSQL + Redis ayağa kalkar. Gerçek HTTP isteği atılı
 ## 📁 Package Yapısı
 
 ```
-com.yourname.ecommerce
+com.ecommerce
 ├── config/
-│   ├── SecurityConfig.java          ← Spring Security filter chain, endpoint yetkileri
-│   ├── JwtConfig.java               ← JWT secret, expiration config (@ConfigurationProperties)
-│   ├── RedisConfig.java             ← RedisTemplate<String, String> bean
-│   ├── SwaggerConfig.java           ← OpenAPI definition, SecurityScheme
-│   └── AsyncConfig.java             ← @EnableAsync, ThreadPoolTaskExecutor bean
+│   ├── SecurityConfig.java          ← Spring Security filter chain, stateless JWT, endpoint yetkileri
+│   ├── RedisConfig.java             ← Redis connection factory, RedisTemplate ve Cache TTL ayarları
+│   └── AsyncConfig.java             ← @EnableAsync, ThreadPoolTaskExecutor (Worker Thread havuzu)
 │
 ├── controller/
 │   ├── AuthController.java          ← register, login, refresh, logout
-│   ├── ProductController.java       ← ürün CRUD + sayfalama
+│   ├── ProductController.java       ← ürün CRUD + dinamik filtreleme + sayfalama
 │   ├── CategoryController.java      ← kategori CRUD
 │   ├── OrderController.java         ← sipariş ver, listele, iptal
 │   └── AdminOrderController.java    ← tüm siparişler, durum güncelle
 │
 ├── service/
-│   ├── AuthService.java             ← register/login iş mantığı
-│   ├── ProductService.java          ← ürün CRUD, stok kontrolü, LowStockEvent
-│   ├── CategoryService.java         ← kategori CRUD
-│   ├── OrderService.java            ← sipariş kaydet, iptal, durum güncelle
-│   └── PricingService.java          ← toplam fiyat hesapla
+│   ├── AuthService.java             ← kimlik doğrulama, token rotasyonu, blacklist & brute-force kontrolü
+│   ├── ProductService.java          ← ürün CRUD, Redis cache (@Cacheable, @CacheEvict), stok kontrolü
+│   ├── CategoryService.java         ← kategori CRUD, Redis cache
+│   ├── OrderService.java            ← sipariş kaydet, iptal, geçmiş siparişleri listele
+│   └── PricingService.java          ← sepetteki ham toplam tutarı hesapla
 │
 ├── facade/
-│   └── OrderFacade.java             ← sipariş verme akışını koordine eder
+│   └── OrderFacade.java             ← sipariş orkestrasyonu (lock, stok, indirim, kayıt, event fırlatma)
 │
 ├── event/
-│   ├── OrderPlacedEvent.java        ← sipariş verildi
-│   ├── OrderStatusChangedEvent.java ← durum değişti
-│   ├── LowStockEvent.java           ← stok kritik seviyede
-│   ├── OrderEventListener.java      ← @TransactionalEventListener, @Async
-│   └── StockEventListener.java      ← @TransactionalEventListener, @Async
+│   ├── OrderPlacedEvent.java        ← sipariş verildi olay modeli (orderId, userId, userEmail, totalPrice)
+│   ├── OrderStatusChangedEvent.java ← durum değişti olay modeli (orderId, userEmail, oldStatus, newStatus)
+│   ├── OrderEventListener.java      ← @Async, bildirim adapter'ları (Email + Push) ile müşteriyi bilgilendirir
+│   └── InvoiceEventListener.java    ← @Async, INV-2026-XXXXXX formatında e-fatura kesimini simüle eder
 │
 ├── pattern/
 │   ├── strategy/
-│   │   ├── DiscountStrategy.java            ← interface
-│   │   ├── NoDiscountStrategy.java
-│   │   ├── PercentageDiscountStrategy.java
-│   │   ├── FixedAmountDiscountStrategy.java
-│   │   └── DiscountStrategyFactory.java     ← aktif stratejiyi döndürür
+│   │   ├── DiscountStrategy.java            ← indirim arayüzü
+│   │   ├── NoDiscountStrategy.java          ← indirimsiz strateji
+│   │   ├── PercentageDiscountStrategy.java  ← yüzdelik indirim (%10)
+│   │   ├── FixedAmountDiscountStrategy.java ← sabit tutar indirimi (50 TL)
+│   │   └── DiscountStrategyFactory.java     ← konfigürasyona veya tipe göre strateji seçici
 │   └── adapter/
-│       ├── NotificationMessage.java         ← recipientEmail, recipientId, title, content
-│       ├── NotificationSender.java          ← interface (sistemin beklediği arayüz)
-│       ├── EmailNotificationAdapter.java    ← FakeEmailClient'a çevirir
-│       ├── PushNotificationAdapter.java     ← FakePushClient'a çevirir
+│       ├── NotificationMessage.java         ← recipient, title, body DTO
+│       ├── NotificationSender.java          ← sistemin beklediği bildirim arayüzü
+│       ├── EmailNotificationAdapter.java    ← FakeEmailClient'a adapte eder
+│       ├── PushNotificationAdapter.java     ← FakePushClient'a adapte eder
 │       └── client/
-│           ├── FakeEmailClient.java         ← "dış kütüphane" taklidi, sadece log basar
-│           └── FakePushClient.java          ← "dış kütüphane" taklidi, sadece log basar
+│           ├── FakeEmailClient.java         ← dış email SDK simülasyonu
+│           └── FakePushClient.java          ← dış mobil push SDK simülasyonu
 │
 ├── entity/
-│   ├── User.java
-│   ├── Product.java
-│   ├── Category.java
-│   ├── Order.java
-│   └── OrderItem.java
+│   ├── User.java                    ← kullanıcı entity'si
+│   ├── Product.java                 ← ürün entity'si (kategori ilişkisi, stock)
+│   ├── Category.java                ← kategori entity'si
+│   ├── Order.java                   ← sipariş başlığı (totalPrice, status)
+│   └── OrderItem.java               ← sipariş kalemi (product, quantity, unitPrice)
 │
 ├── repository/
-│   ├── UserRepository.java
-│   ├── ProductRepository.java       ← findByIdWithLock, findWithFilters
-│   ├── CategoryRepository.java
-│   ├── OrderRepository.java         ← findByUser, findByStatus
+│   ├── UserRepository.java          ← findByEmail
+│   ├── ProductRepository.java       ← findByIdWithLock (Pessimistic Lock 3000ms), findWithFilters
+│   ├── CategoryRepository.java      ← existsByName
+│   ├── OrderRepository.java         ← findByUser, findByStatus, findByIdAndUserIdWithItems
 │   └── OrderItemRepository.java
 │
 ├── dto/
+│   ├── CategoryDto.java
+│   ├── ProductDto.java
+│   ├── OrderDto.java
+│   ├── OrderItemDto.java
 │   ├── request/
-│   │   ├── LoginRequest.java
 │   │   ├── RegisterRequest.java
+│   │   ├── LoginRequest.java
 │   │   ├── RefreshTokenRequest.java
-│   │   ├── LogoutRequest.java
-│   │   ├── ProductRequest.java
-│   │   ├── CategoryRequest.java
-│   │   ├── OrderRequest.java
-│   │   ├── OrderItemRequest.java
-│   │   └── OrderStatusRequest.java
+│   │   ├── ProductCreateRequest.java
+│   │   ├── CategoryCreateRequest.java
+│   │   └── OrderCreateRequest.java
 │   └── response/
-│       ├── ErrorResponse (exception/ paketinde) ← hata formatı
-│       ├── AuthResponse.java        ← accessToken, refreshToken
-│       ├── ProductResponse.java     ← id, name, price, stock, category
-│       ├── CategoryResponse.java
-│       ├── OrderResponse.java       ← id, items, totalPrice, status, createdAt
-│       └── OrderItemResponse.java
+│       └── TokenResponse.java       ← accessToken, refreshToken, tokenType, expiresIn
 │
 ├── exception/
-│   ├── GlobalExceptionHandler.java
-│   ├── ResourceNotFoundException.java
-│   ├── InsufficientStockException.java
-│   ├── UnauthorizedAccessException.java
-│   ├── OrderCancellationException.java
-│   └── TokenException.java
+│   ├── ApiException.java                 ← tüm özel hataların temeli (HttpStatus + message)
+│   ├── ResourceNotFoundException.java    ← 404 Not Found
+│   ├── AlreadyExistsException.java       ← 409 Conflict
+│   ├── InsufficientStockException.java   ← 400 Bad Request
+│   ├── OrderCancellationException.java   ← 400 Bad Request
+│   ├── RateLimitException.java           ← 429 Too Many Requests
+│   ├── UnauthorizedException.java        ← 401 Unauthorized
+│   ├── ErrorResponse.java                ← standart JSON hata formatı
+│   └── GlobalExceptionHandler.java       ← @RestControllerAdvice merkezi
 │
 ├── security/
-│   ├── JwtTokenProvider.java        ← token üret, doğrula, claim'leri çıkar
-│   ├── JwtAuthenticationFilter.java ← her istekte token'ı kontrol eder
-│   └── CustomUserDetailsService.java← email ile User yükle
+│   ├── JwtTokenProvider.java             ← JWT token üretimi, doğrulama, claim çıkarma
+│   ├── JwtAuthenticationFilter.java      ← her istekte Bearer token ve Redis blacklist kontrolü
+│   ├── CustomUserDetailsService.java     ← veritabanından User yükleme
+│   ├── JwtAuthenticationEntryPoint.java  ← kimliksiz isteklerde 401 JSON yanıtı
+│   └── JwtAccessDeniedHandler.java       ← yetkisiz rol isteklerinde 403 JSON yanıtı
 │
 ├── redis/
-│   ├── RefreshTokenService.java     ← save, find, delete refresh token
-│   └── TokenBlacklistService.java   ← blacklist'e ekle, var mı kontrol et
+│   ├── RefreshTokenService.java          ← Refresh token saklama, rotasyon, doğrulama, silme
+│   ├── TokenBlacklistService.java        ← Logout olan token'ları TTL süresince kara listeye alma
+│   └── RateLimitService.java             ← IP bazlı 5 denemede 15 dk kilitleme (sliding window)
 │
 ├── mapper/
-│   ├── ProductMapper.java           ← Product ↔ ProductRequest/Response dönüşümü
-│   ├── CategoryMapper.java
-│   └── OrderMapper.java
+│   ├── ProductMapper.java                ← MapStruct: Product ↔ ProductDto / ProductCreateRequest
+│   ├── CategoryMapper.java               ← MapStruct: Category ↔ CategoryDto
+│   └── OrderMapper.java                  ← MapStruct: Order ↔ OrderDto
 │
 └── enums/
-    ├── Role.java                    ← ADMIN, CUSTOMER
-    └── OrderStatus.java             ← PENDING, CONFIRMED, SHIPPED, DELIVERED, CANCELLED
+    ├── Role.java                         ← ADMIN, CUSTOMER
+    └── OrderStatus.java                  ← PENDING, CONFIRMED, SHIPPED, DELIVERED, CANCELLED
 ```
 
 ---
