@@ -127,7 +127,8 @@ public class SecurityConfig {
                                 "/swagger-ui/**",
                                 "/swagger-ui.html",
                                 "/api-docs/**",
-                                "/v3/api-docs/**")
+                                "/v3/api-docs/**",
+                                "/actuator/**")
                         .permitAll()
 
                         // Urun ve kategori LISTELEME: Herkese acik (arama/browse icin)

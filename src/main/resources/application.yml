@@ -4,7 +4,7 @@ spring:
 
   # PostgreSQL (docker-compose ile uyumlu)
   datasource:
-    url: jdbc:postgresql://localhost:5432/ecommerce
+    url: jdbc:postgresql://localhost:5433/ecommerce
     username: admin
     password: password
     driver-class-name: org.postgresql.Driver
@@ -61,4 +61,20 @@ ecommerce:
     active-strategy: PERCENTAGE # NO_DISCOUNT | PERCENTAGE | FIXED_AMOUNT
     percentage-rate: 0.10       # %10 indirim
     fixed-amount: 50.00         # 50.00 TL indirim
+
+# Actuator & Metrics (Prometheus)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+    prometheus:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
 

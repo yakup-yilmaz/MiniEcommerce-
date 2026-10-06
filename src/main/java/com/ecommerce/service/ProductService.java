@@ -111,6 +111,14 @@ public class ProductService {
         log.info("Stok düşüldü: Ürün ID={}, Kalan stok={}", product.getId(), product.getStock());
     }
 
+    @CacheEvict(value = "products", key = "#product.id")
+    @Transactional
+    public void increaseStock(Product product, Integer quantity) {
+        product.setStock(product.getStock() + quantity);
+        productRepository.save(product);
+        log.info("Stok iade edildi: Ürün ID={}, Yeni stok={}", product.getId(), product.getStock());
+    }
+
     // Sipariş modülü için: Kilitli Entity getirme (Pessimistic Lock - Race
     // condition önler)
     @Transactional

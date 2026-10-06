@@ -28,7 +28,7 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
             "(:categoryId IS NULL OR p.category.id = :categoryId) AND " +
             "(:minPrice IS NULL OR p.price >= :minPrice) AND " +
             "(:maxPrice IS NULL OR p.price <= :maxPrice) AND " +
-            "(:name IS NULL OR LOWER(p.name) LIKE LOWER(CONCAT('%', :name, '%')))")
+            "(:name IS NULL OR LOWER(p.name) LIKE LOWER(CONCAT('%', CAST(:name AS String), '%')))")
     Page<Product> findWithFilters(
             @Param("categoryId") Long categoryId,
             @Param("minPrice") BigDecimal minPrice,
